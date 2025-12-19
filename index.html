@@ -3,26 +3,37 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>TFG Login (Cognito PKCE)</title>
+  <title>TFG Portal (Cognito PKCE + Descarga S3)</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 780px; margin: 40px auto; padding: 0 16px; }
-    button { padding: 10px 14px; margin-right: 10px; margin-top: 8px; }
+    body { font-family: system-ui, sans-serif; max-width: 880px; margin: 40px auto; padding: 0 16px; }
+    button, input { padding: 10px 14px; margin-right: 10px; margin-top: 8px; }
+    input { min-width: 340px; }
     pre { background: #f6f6f6; padding: 12px; overflow: auto; white-space: pre-wrap; }
     .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
     .ok { color: #0a7; font-weight: 600; }
     .bad { color: #b00; font-weight: 600; }
+    .muted { color: #666; font-size: 0.95rem; }
+    code { background: #f2f2f2; padding: 2px 6px; border-radius: 6px; }
   </style>
 </head>
 <body>
-  <h1>Portal de Login (Cognito + PKCE)</h1>
+  <h1>Portal de Login (Cognito + PKCE) + Descarga S3 (URL prefirmada)</h1>
+  <p class="muted">
+    Flujo: Login (Hosted UI) → Token (PKCE) → API Gateway <code>/download</code> (JWT Authorizer) → Lambda → URL prefirmada → S3 privado.
+  </p>
 
   <div class="row">
     <button id="loginBtn">Login</button>
     <button id="logoutBtn">Logout</button>
     <button id="showBtn">Ver tokens (debug)</button>
-    <button id="apiBtn">Llamar a API (/me)</button>
+    <button id="downloadBtn">Pedir URL y descargar</button>
     <button id="clearBtn">Borrar tokens</button>
     <span id="status"></span>
+  </div>
+
+  <div class="row" style="margin-top: 10px;">
+    <label for="fileKey"><strong>Archivo</strong> (en S3 bajo <code>downloads/</code>):</label>
+    <input id="fileKey" type="text" value="Captura de pantalla 2025-11-19 205736.png" />
   </div>
 
   <h2>Salida</h2>
@@ -35,8 +46,8 @@ const CLIENT_ID = "7j1dj2a56vg9tonifmubp7lkhl";
 const REDIRECT_URI = "https://normoncorp.github.io/TFG-25-26-AWS/";
 const SCOPES = ["openid", "email", "profile"];
 
-/* CUANDO CREES LA API GATEWAY, PON AQUÍ LA URL BASE */
-const API_BASE = "https://TU_API_ID.execute-api.eu-north-1.amazonaws.com";
+// API Gateway Invoke URL (tuya)
+const API_BASE = "https://cjb52739gl.execute-api.eu-north-1.amazonaws.com";
 /* ================================================== */
 
 const out = document.getElementById("out");
@@ -44,7 +55,7 @@ const statusEl = document.getElementById("status");
 function log(msg) { out.textContent = msg; }
 function setStatus(ok, txt) { statusEl.className = ok ? "ok" : "bad"; statusEl.textContent = txt; }
 
-/* ===================== PKCE ===================== */
+/* ===================== PKCE HELPERS ===================== */
 function base64UrlEncode(arrayBuffer) {
   const bytes = new Uint8Array(arrayBuffer);
   let str = "";
@@ -71,7 +82,7 @@ function tokenSet(obj) { sessionStorage.setItem("tokens", JSON.stringify(obj)); 
 function tokenGet() { const raw = sessionStorage.getItem("tokens"); return raw ? JSON.parse(raw) : null; }
 function tokenClear() { sessionStorage.removeItem("tokens"); }
 
-/* ===================== OAUTH ===================== */
+/* ===================== OAUTH (PKCE) ===================== */
 async function buildAuthorizeUrl() {
   const state = randomString(24);
   const verifier = randomString(64);
@@ -112,12 +123,13 @@ async function exchangeCodeForTokens(code) {
   });
 
   const text = await resp.text();
-  if (!resp.ok) throw new Error(`Token exchange falló: ${text}`);
+  if (!resp.ok) throw new Error(`Token exchange falló: HTTP ${resp.status}\n${text}`);
 
   const tokens = JSON.parse(text);
   tokenSet(tokens);
   ssDel("pkce_state");
   ssDel("pkce_verifier");
+  return tokens;
 }
 
 async function refreshTokens() {
@@ -137,10 +149,12 @@ async function refreshTokens() {
   });
 
   const text = await resp.text();
-  if (!resp.ok) throw new Error(`Refresh falló: ${text}`);
+  if (!resp.ok) throw new Error(`Refresh falló: HTTP ${resp.status}\n${text}`);
 
   const fresh = JSON.parse(text);
+  // Cognito normalmente NO devuelve refresh_token en refresh; preserva el anterior
   tokenSet({ ...t, ...fresh, refresh_token: t.refresh_token });
+  return tokenGet();
 }
 
 function buildLogoutUrl() {
@@ -148,17 +162,25 @@ function buildLogoutUrl() {
   return `${COGNITO_DOMAIN}/logout?${params.toString()}`;
 }
 
-/* ===================== CALLBACK ===================== */
+/* ===================== CALLBACK HANDLER ===================== */
 async function handleCallback() {
   const url = new URL(window.location.href);
   const code = url.searchParams.get("code");
   const state = url.searchParams.get("state");
+  const err = url.searchParams.get("error");
+  const errDesc = url.searchParams.get("error_description");
+
+  if (err) {
+    setStatus(false, "Error OAuth");
+    log(`${err}\n${errDesc || ""}`);
+    return;
+  }
 
   if (!code) {
     const t = tokenGet();
     if (t?.access_token) {
       setStatus(true, "Sesión activa");
-      log("Tokens guardados. Puedes llamar a la API.");
+      log("Tokens guardados. Puedes pedir una URL prefirmada y descargar desde S3.");
     } else {
       setStatus(false, "Sin sesión");
       log("Pulsa Login para iniciar sesión.");
@@ -168,24 +190,28 @@ async function handleCallback() {
 
   if (state !== ssGet("pkce_state")) {
     setStatus(false, "STATE inválido");
-    log("STATE inválido. Reintenta login.");
+    log("STATE inválido. Reintenta login (no recargues durante el flujo).");
     return;
   }
 
   try {
     setStatus(true, "Canjeando code...");
+    log("Intercambiando code por tokens...");
     await exchangeCodeForTokens(code);
+
+    // Limpia querystring (quita code/state)
     window.history.replaceState({}, document.title, REDIRECT_URI);
+
     setStatus(true, "Login OK");
-    log("Login correcto. Tokens listos.");
+    log("Login correcto. Tokens listos.\nPulsa 'Pedir URL y descargar'.");
   } catch (e) {
     setStatus(false, "Error login");
     log(String(e));
   }
 }
 
-/* ===================== API CALL ===================== */
-async function callApi() {
+/* ===================== DOWNLOAD VIA API ===================== */
+async function requestPresignedUrlAndDownload() {
   const t = tokenGet();
   if (!t?.access_token) {
     setStatus(false, "Sin access_token");
@@ -193,22 +219,52 @@ async function callApi() {
     return;
   }
 
+  const fileName = document.getElementById("fileKey").value.trim();
+  if (!fileName) {
+    setStatus(false, "Falta archivo");
+    log("Introduce el nombre del archivo (tal cual está en S3 bajo downloads/).");
+    return;
+  }
+
+  const endpoint = `${API_BASE}/download?key=${encodeURIComponent(fileName)}`;
+
   try {
-    let resp = await fetch(`${API_BASE}/me`, {
+    setStatus(true, "Llamando API...");
+    log(`GET ${endpoint}\n\n(Enviando Authorization: Bearer <access_token>)`);
+
+    let resp = await fetch(endpoint, {
       headers: { Authorization: `Bearer ${t.access_token}` }
     });
 
+    // Si token expiró, refrescamos e intentamos una vez más
     if (resp.status === 401 || resp.status === 403) {
       await refreshTokens();
       const nt = tokenGet();
-      resp = await fetch(`${API_BASE}/me`, {
+      resp = await fetch(endpoint, {
         headers: { Authorization: `Bearer ${nt.access_token}` }
       });
     }
 
-    const text = await resp.text();
-    setStatus(resp.ok, resp.ok ? "API OK" : "API error");
-    log(`HTTP ${resp.status}\n${text}`);
+    const data = await resp.json().catch(() => null);
+
+    if (!resp.ok) {
+      setStatus(false, "API error");
+      log(`HTTP ${resp.status}\n${JSON.stringify(data, null, 2)}`);
+      return;
+    }
+
+    setStatus(true, "URL prefirmada OK");
+    log(JSON.stringify(data, null, 2));
+
+    if (!data?.url) {
+      setStatus(false, "Sin URL");
+      log("La API respondió OK pero no devolvió 'url'. Revisa la Lambda.");
+      return;
+    }
+
+    // Dispara descarga (navegación a la URL prefirmada)
+    window.location.href = data.url;
+
   } catch (e) {
     setStatus(false, "Error API");
     log(String(e));
@@ -216,12 +272,36 @@ async function callApi() {
 }
 
 /* ===================== BUTTONS ===================== */
-document.getElementById("loginBtn").onclick = async () => window.location.href = await buildAuthorizeUrl();
-document.getElementById("logoutBtn").onclick = () => { tokenClear(); window.location.href = buildLogoutUrl(); };
-document.getElementById("showBtn").onclick = () => log(JSON.stringify(tokenGet(), null, 2));
-document.getElementById("clearBtn").onclick = () => { tokenClear(); setStatus(false, "Tokens borrados"); log(""); };
-document.getElementById("apiBtn").onclick = callApi;
+document.getElementById("loginBtn").onclick = async () => {
+  try {
+    window.location.href = await buildAuthorizeUrl();
+  } catch (e) {
+    setStatus(false, "Error");
+    log(String(e));
+  }
+};
 
+document.getElementById("logoutBtn").onclick = () => {
+  tokenClear();
+  window.location.href = buildLogoutUrl();
+};
+
+document.getElementById("showBtn").onclick = () => {
+  const t = tokenGet();
+  if (!t) { setStatus(false, "Sin tokens"); log("No hay tokens en sessionStorage."); return; }
+  setStatus(true, "Tokens OK");
+  log(JSON.stringify(t, null, 2));
+};
+
+document.getElementById("downloadBtn").onclick = requestPresignedUrlAndDownload;
+
+document.getElementById("clearBtn").onclick = () => {
+  tokenClear();
+  setStatus(false, "Tokens borrados");
+  log("Tokens borrados de sessionStorage.");
+};
+
+/* ===================== INIT ===================== */
 handleCallback();
 </script>
 </body>
