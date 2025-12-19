@@ -20,6 +20,7 @@
     <button id="loginBtn">Login</button>
     <button id="logoutBtn">Logout</button>
     <button id="showBtn">Ver tokens (debug)</button>
+    <button id="apiBtn">Llamar a API (/me)</button>
     <button id="clearBtn">Borrar tokens</button>
     <span id="status"></span>
   </div>
@@ -28,19 +29,22 @@
   <pre id="out"></pre>
 
 <script>
-/** ====== CONFIG (YA RELLENA) ====== */
+/* ===================== CONFIG ===================== */
 const COGNITO_DOMAIN = "https://eu-north-1ezalt6vlv.auth.eu-north-1.amazoncognito.com";
 const CLIENT_ID = "7j1dj2a56vg9tonifmubp7lkhl";
 const REDIRECT_URI = "https://normoncorp.github.io/TFG-25-26-AWS/";
 const SCOPES = ["openid", "email", "profile"];
 
-/** UI */
+/* CUANDO CREES LA API GATEWAY, PON AQUÍ LA URL BASE */
+const API_BASE = "https://TU_API_ID.execute-api.eu-north-1.amazonaws.com";
+/* ================================================== */
+
 const out = document.getElementById("out");
 const statusEl = document.getElementById("status");
 function log(msg) { out.textContent = msg; }
 function setStatus(ok, txt) { statusEl.className = ok ? "ok" : "bad"; statusEl.textContent = txt; }
 
-/** PKCE helpers */
+/* ===================== PKCE ===================== */
 function base64UrlEncode(arrayBuffer) {
   const bytes = new Uint8Array(arrayBuffer);
   let str = "";
@@ -59,7 +63,7 @@ async function sha256(str) {
   return await crypto.subtle.digest("SHA-256", data);
 }
 
-/** session storage */
+/* ===================== STORAGE ===================== */
 function ssSet(k, v) { sessionStorage.setItem(k, v); }
 function ssGet(k) { return sessionStorage.getItem(k); }
 function ssDel(k) { sessionStorage.removeItem(k); }
@@ -67,7 +71,7 @@ function tokenSet(obj) { sessionStorage.setItem("tokens", JSON.stringify(obj)); 
 function tokenGet() { const raw = sessionStorage.getItem("tokens"); return raw ? JSON.parse(raw) : null; }
 function tokenClear() { sessionStorage.removeItem("tokens"); }
 
-/** OAuth */
+/* ===================== OAUTH ===================== */
 async function buildAuthorizeUrl() {
   const state = randomString(24);
   const verifier = randomString(64);
@@ -91,7 +95,7 @@ async function buildAuthorizeUrl() {
 
 async function exchangeCodeForTokens(code) {
   const verifier = ssGet("pkce_verifier");
-  if (!verifier) throw new Error("Falta code_verifier (PKCE). Reintenta Login.");
+  if (!verifier) throw new Error("Falta code_verifier (PKCE).");
 
   const body = new URLSearchParams({
     grant_type: "authorization_code",
@@ -108,13 +112,35 @@ async function exchangeCodeForTokens(code) {
   });
 
   const text = await resp.text();
-  if (!resp.ok) throw new Error(`Token exchange falló: HTTP ${resp.status}\n${text}`);
+  if (!resp.ok) throw new Error(`Token exchange falló: ${text}`);
 
   const tokens = JSON.parse(text);
   tokenSet(tokens);
   ssDel("pkce_state");
   ssDel("pkce_verifier");
-  return tokens;
+}
+
+async function refreshTokens() {
+  const t = tokenGet();
+  if (!t?.refresh_token) throw new Error("No refresh_token disponible.");
+
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    client_id: CLIENT_ID,
+    refresh_token: t.refresh_token,
+  });
+
+  const resp = await fetch(`${COGNITO_DOMAIN}/oauth2/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+
+  const text = await resp.text();
+  if (!resp.ok) throw new Error(`Refresh falló: ${text}`);
+
+  const fresh = JSON.parse(text);
+  tokenSet({ ...t, ...fresh, refresh_token: t.refresh_token });
 }
 
 function buildLogoutUrl() {
@@ -122,69 +148,79 @@ function buildLogoutUrl() {
   return `${COGNITO_DOMAIN}/logout?${params.toString()}`;
 }
 
-/** Callback handler */
+/* ===================== CALLBACK ===================== */
 async function handleCallback() {
   const url = new URL(window.location.href);
   const code = url.searchParams.get("code");
   const state = url.searchParams.get("state");
-  const err = url.searchParams.get("error");
-  const errDesc = url.searchParams.get("error_description");
-
-  if (err) { setStatus(false, "Error OAuth"); log(`${err}\n${errDesc || ""}`); return; }
 
   if (!code) {
     const t = tokenGet();
-    if (t?.access_token) { setStatus(true, "Sesión detectada"); log("Tokens guardados. Pulsa 'Ver tokens (debug)' o 'Logout'."); }
-    else { setStatus(false, "Sin sesión"); log("Pulsa Login para iniciar sesión."); }
+    if (t?.access_token) {
+      setStatus(true, "Sesión activa");
+      log("Tokens guardados. Puedes llamar a la API.");
+    } else {
+      setStatus(false, "Sin sesión");
+      log("Pulsa Login para iniciar sesión.");
+    }
     return;
   }
 
-  const expectedState = ssGet("pkce_state");
-  if (!expectedState || state !== expectedState) {
+  if (state !== ssGet("pkce_state")) {
     setStatus(false, "STATE inválido");
-    log("STATE inválido. Reintenta Login (no recargues la página durante el flujo).");
+    log("STATE inválido. Reintenta login.");
     return;
   }
 
   try {
     setStatus(true, "Canjeando code...");
-    log("Intercambiando code por tokens...");
     await exchangeCodeForTokens(code);
-
-    // Limpia querystring (quita code/state)
     window.history.replaceState({}, document.title, REDIRECT_URI);
-
     setStatus(true, "Login OK");
-    log("Login OK. Tokens guardados.\nPulsa 'Ver tokens (debug)'.");
+    log("Login correcto. Tokens listos.");
   } catch (e) {
-    setStatus(false, "Fallo token");
+    setStatus(false, "Error login");
     log(String(e));
   }
 }
 
-/** Buttons */
-document.getElementById("loginBtn").addEventListener("click", async () => {
-  try { window.location.href = await buildAuthorizeUrl(); }
-  catch (e) { setStatus(false, "Error"); log(String(e)); }
-});
-
-document.getElementById("logoutBtn").addEventListener("click", () => {
-  tokenClear();
-  window.location.href = buildLogoutUrl();
-});
-
-document.getElementById("showBtn").addEventListener("click", () => {
+/* ===================== API CALL ===================== */
+async function callApi() {
   const t = tokenGet();
-  if (!t) { setStatus(false, "Sin tokens"); log("No hay tokens."); return; }
-  setStatus(true, "Tokens OK");
-  log(JSON.stringify(t, null, 2));
-});
+  if (!t?.access_token) {
+    setStatus(false, "Sin access_token");
+    log("Haz login primero.");
+    return;
+  }
 
-document.getElementById("clearBtn").addEventListener("click", () => {
-  tokenClear();
-  setStatus(false, "Tokens borrados");
-  log("Tokens borrados de sessionStorage.");
-});
+  try {
+    let resp = await fetch(`${API_BASE}/me`, {
+      headers: { Authorization: `Bearer ${t.access_token}` }
+    });
+
+    if (resp.status === 401 || resp.status === 403) {
+      await refreshTokens();
+      const nt = tokenGet();
+      resp = await fetch(`${API_BASE}/me`, {
+        headers: { Authorization: `Bearer ${nt.access_token}` }
+      });
+    }
+
+    const text = await resp.text();
+    setStatus(resp.ok, resp.ok ? "API OK" : "API error");
+    log(`HTTP ${resp.status}\n${text}`);
+  } catch (e) {
+    setStatus(false, "Error API");
+    log(String(e));
+  }
+}
+
+/* ===================== BUTTONS ===================== */
+document.getElementById("loginBtn").onclick = async () => window.location.href = await buildAuthorizeUrl();
+document.getElementById("logoutBtn").onclick = () => { tokenClear(); window.location.href = buildLogoutUrl(); };
+document.getElementById("showBtn").onclick = () => log(JSON.stringify(tokenGet(), null, 2));
+document.getElementById("clearBtn").onclick = () => { tokenClear(); setStatus(false, "Tokens borrados"); log(""); };
+document.getElementById("apiBtn").onclick = callApi;
 
 handleCallback();
 </script>
