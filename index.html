@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>TFG Login (Cognito PKCE)</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 780px; margin: 40px auto; padding: 0 16px; }
+    button { padding: 10px 14px; margin-right: 10px; margin-top: 8px; }
+    pre { background: #f6f6f6; padding: 12px; overflow: auto; white-space: pre-wrap; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .ok { color: #0a7; font-weight: 600; }
+    .bad { color: #b00; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>Portal de Login (Cognito + PKCE)</h1>
+
+  <div class="row">
+    <button id="loginBtn">Login</button>
+    <button id="logoutBtn">Logout</button>
+    <button id="showBtn">Ver tokens (debug)</button>
+    <button id="clearBtn">Borrar tokens</button>
+    <span id="status"></span>
+  </div>
+
+  <h2>Salida</h2>
+  <pre id="out"></pre>
+
+<script>
+/** ====== CONFIG (YA RELLENA) ====== */
+const COGNITO_DOMAIN = "https://eu-north-1ezalt6vlv.auth.eu-north-1.amazoncognito.com";
+const CLIENT_ID = "7j1dj2a56vg9tonifmubp7lkhl";
+const REDIRECT_URI = "https://normoncorp.github.io/TFG-25-26-AWS/";
+const SCOPES = ["openid", "email", "profile"];
+
+/** UI */
+const out = document.getElementById("out");
+const statusEl = document.getElementById("status");
+function log(msg) { out.textContent = msg; }
+function setStatus(ok, txt) { statusEl.className = ok ? "ok" : "bad"; statusEl.textContent = txt; }
+
+/** PKCE helpers */
+function base64UrlEncode(arrayBuffer) {
+  const bytes = new Uint8Array(arrayBuffer);
+  let str = "";
+  for (const b of bytes) str += String.fromCharCode(b);
+  return btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+function randomString(len = 64) {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+  const rnd = crypto.getRandomValues(new Uint8Array(len));
+  let s = "";
+  for (let i = 0; i < len; i++) s += chars[rnd[i] % chars.length];
+  return s;
+}
+async function sha256(str) {
+  const data = new TextEncoder().encode(str);
+  return await crypto.subtle.digest("SHA-256", data);
+}
+
+/** session storage */
+function ssSet(k, v) { sessionStorage.setItem(k, v); }
+function ssGet(k) { return sessionStorage.getItem(k); }
+function ssDel(k) { sessionStorage.removeItem(k); }
+function tokenSet(obj) { sessionStorage.setItem("tokens", JSON.stringify(obj)); }
+function tokenGet() { const raw = sessionStorage.getItem("tokens"); return raw ? JSON.parse(raw) : null; }
+function tokenClear() { sessionStorage.removeItem("tokens"); }
+
+/** OAuth */
+async function buildAuthorizeUrl() {
+  const state = randomString(24);
+  const verifier = randomString(64);
+  const challenge = base64UrlEncode(await sha256(verifier));
+
+  ssSet("pkce_state", state);
+  ssSet("pkce_verifier", verifier);
+
+  const params = new URLSearchParams({
+    response_type: "code",
+    client_id: CLIENT_ID,
+    redirect_uri: REDIRECT_URI,
+    scope: SCOPES.join(" "),
+    state,
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+  });
+
+  return `${COGNITO_DOMAIN}/oauth2/authorize?${params.toString()}`;
+}
+
+async function exchangeCodeForTokens(code) {
+  const verifier = ssGet("pkce_verifier");
+  if (!verifier) throw new Error("Falta code_verifier (PKCE). Reintenta Login.");
+
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    client_id: CLIENT_ID,
+    code,
+    redirect_uri: REDIRECT_URI,
+    code_verifier: verifier,
+  });
+
+  const resp = await fetch(`${COGNITO_DOMAIN}/oauth2/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+
+  const text = await resp.text();
+  if (!resp.ok) throw new Error(`Token exchange falló: HTTP ${resp.status}\n${text}`);
+
+  const tokens = JSON.parse(text);
+  tokenSet(tokens);
+  ssDel("pkce_state");
+  ssDel("pkce_verifier");
+  return tokens;
+}
+
+function buildLogoutUrl() {
+  const params = new URLSearchParams({ client_id: CLIENT_ID, logout_uri: REDIRECT_URI });
+  return `${COGNITO_DOMAIN}/logout?${params.toString()}`;
+}
+
+/** Callback handler */
+async function handleCallback() {
+  const url = new URL(window.location.href);
+  const code = url.searchParams.get("code");
+  const state = url.searchParams.get("state");
+  const err = url.searchParams.get("error");
+  const errDesc = url.searchParams.get("error_description");
+
+  if (err) { setStatus(false, "Error OAuth"); log(`${err}\n${errDesc || ""}`); return; }
+
+  if (!code) {
+    const t = tokenGet();
+    if (t?.access_token) { setStatus(true, "Sesión detectada"); log("Tokens guardados. Pulsa 'Ver tokens (debug)' o 'Logout'."); }
+    else { setStatus(false, "Sin sesión"); log("Pulsa Login para iniciar sesión."); }
+    return;
+  }
+
+  const expectedState = ssGet("pkce_state");
+  if (!expectedState || state !== expectedState) {
+    setStatus(false, "STATE inválido");
+    log("STATE inválido. Reintenta Login (no recargues la página durante el flujo).");
+    return;
+  }
+
+  try {
+    setStatus(true, "Canjeando code...");
+    log("Intercambiando code por tokens...");
+    await exchangeCodeForTokens(code);
+
+    // Limpia querystring (quita code/state)
+    window.history.replaceState({}, document.title, REDIRECT_URI);
+
+    setStatus(true, "Login OK");
+    log("Login OK. Tokens guardados.\nPulsa 'Ver tokens (debug)'.");
+  } catch (e) {
+    setStatus(false, "Fallo token");
+    log(String(e));
+  }
+}
+
+/** Buttons */
+document.getElementById("loginBtn").addEventListener("click", async () => {
+  try { window.location.href = await buildAuthorizeUrl(); }
+  catch (e) { setStatus(false, "Error"); log(String(e)); }
+});
+
+document.getElementById("logoutBtn").addEventListener("click", () => {
+  tokenClear();
+  window.location.href = buildLogoutUrl();
+});
+
+document.getElementById("showBtn").addEventListener("click", () => {
+  const t = tokenGet();
+  if (!t) { setStatus(false, "Sin tokens"); log("No hay tokens."); return; }
+  setStatus(true, "Tokens OK");
+  log(JSON.stringify(t, null, 2));
+});
+
+document.getElementById("clearBtn").addEventListener("click", () => {
+  tokenClear();
+  setStatus(false, "Tokens borrados");
+  log("Tokens borrados de sessionStorage.");
+});
+
+handleCallback();
+</script>
+</body>
+</html>
