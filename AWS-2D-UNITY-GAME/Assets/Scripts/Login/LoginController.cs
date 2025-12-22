@@ -4,9 +4,7 @@ using System.Text;
 using UnityEngine;
 using UnityEngine.Networking;
 using System.Security.Cryptography;
-using UnityEngine.UI;
 using TMPro;
-using Unity.VectorGraphics;
 using UnityEngine.SceneManagement;
 
 /* USER POOL 
@@ -38,12 +36,8 @@ public class LoginController : MonoBehaviour
 
     [SerializeField]
     private string goToScene;
-
-    void Start()
-    {
-        //StartCoroutine(SignUp());
-        //StartCoroutine(ConfirmSignUp());
-    }
+    [SerializeField]
+    private TMP_Text errorText;
 
     [System.Serializable]
     public class SignUpAttribute
@@ -87,6 +81,7 @@ public class LoginController : MonoBehaviour
         public AuthParameters AuthParameters;
     }
 
+    // CORRUTINA PARA REGISTRAR AL USUARIO SIN VERIFICAR EN COGNITO
     IEnumerator SignUp()
     {
         SignUpSendData sendData = new SignUpSendData();
@@ -125,13 +120,16 @@ public class LoginController : MonoBehaviour
         if (request.result == UnityWebRequest.Result.Success)
         {
             Debug.Log("Success: " + request.downloadHandler.text);
+            if (errorText != null) errorText.text = "Success";
         }
         else
         {
             Debug.LogError("Error " + request.responseCode + ": " + request.downloadHandler.text);
+            if (errorText != null) errorText.text = "Error en Login " + request.responseCode + ": " + request.downloadHandler.text;
         }
     }
 
+    // CORRUTINA PARA VERIFICAR CON UN CODIGO DE VERIFICACION A UN USUARIO YA REGISTRADO
     IEnumerator ConfirmSignUp()
     {
         ConfirmSignUpSendData sendData = new ConfirmSignUpSendData();
@@ -161,9 +159,11 @@ public class LoginController : MonoBehaviour
         else
         {
             Debug.LogError("Error " + request.responseCode + ": " + request.downloadHandler.text);
+            if (errorText != null) errorText.text = "Error en Login " + request.responseCode + ": " + request.downloadHandler.text;
         }
     }
 
+    // CORRUTINA PARA INICIAR SESION, TIENE QUE EXISTIR EL USUARIO
     IEnumerator SignIn()
     {
         LoginSendData sendData = new LoginSendData();
@@ -183,7 +183,6 @@ public class LoginController : MonoBehaviour
         request.downloadHandler = new DownloadHandlerBuffer();
 
         request.SetRequestHeader("Content-Type", "application/x-amz-json-1.1");
-        // El Target cambia para Login
         request.SetRequestHeader("X-Amz-Target", "AWSCognitoIdentityProviderService.InitiateAuth");
 
         yield return request.SendWebRequest();
@@ -200,9 +199,11 @@ public class LoginController : MonoBehaviour
         else
         {
             Debug.LogError("Error en Login " + request.responseCode + ": " + request.downloadHandler.text);
+            if (errorText != null) errorText.text = "Error en Login " + request.responseCode + ": " + request.downloadHandler.text;
         }
     }
 
+    // CALCULO DE HASH
     string CalculateSecretHash(string userPoolClientSecret, string userName, string userPoolClientId)
     {
         string message = userName + userPoolClientId;
@@ -216,34 +217,32 @@ public class LoginController : MonoBehaviour
         }
     }
 
+    // METODOS PARA PASAR TEXTOS DESDE INPUT FIELDS
     public void SetPassword(TMP_InputField pass)
     {
         PASSWORD = pass.text;
         Debug.Log(PASSWORD);
     }
-
     public void SetUsername(TMP_InputField email)
     {
         USERNAME = email.text;
         Debug.Log(USERNAME);
     }
-
     public void SetCode(TMP_InputField verCode)
     {
         CODE = verCode.text;
         Debug.Log(CODE);
     }
 
+    // METODOS PARA INICIAR LAS CORRUTINAS
     public void SendCode()
     {
         StartCoroutine(SignUp());
     }
-
     public void LogIn()
     {
         StartCoroutine(SignIn());
     }
-
     public void ConfSignUp()
     {
         StartCoroutine(ConfirmSignUp());
