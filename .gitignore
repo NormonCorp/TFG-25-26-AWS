@@ -77,6 +77,7 @@ crashlytics-build.properties
 *.x86_64
 *.ipa
 *.obb
+*.json
 
 # Test Runner
 InitTestScene*.unity*
