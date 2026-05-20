@@ -1,3 +1,6 @@
+# WEB LINK
+https://dorjeeherblas.github.io/Presigned-URL-AWS-UNITYGAME/
+---
 # Technical Framework: Player Protection - The Black Box of Logic
 
 The framework titled **"Player Protection: The Black Box of Logic"** establishes a secure-by-design architecture that shifts the authority of game logic and data validation from the player's client device to a controlled serverless environment. Historically, the video game industry—particularly in independent and academic sectors—has relied on client-side validation, which creates structural vulnerabilities such as score manipulation, account theft, and the distribution of unauthorized versions. This project addresses these gaps by applying **distributed computing principles** and a **Zero Trust paradigm**, ensuring that every request is authenticated, authorized, and verified regardless of its origin.
@@ -13,6 +16,4 @@ The system is constructed using an **Amazon Web Services (AWS)** serverless stac
 ### Authorship and Direction
 This Final Degree Project (TFG) was developed at the **Universidad Complutense de Madrid** by authors **Alberto Peñalba Martos** and **Dorje Khampa Herrezuelo Blasco**, under the direction of **José Luis Vázquez Poletti** and **David Pacios Izquierdo**.
 ---
-# WEB LINK
-https://dorjeeherblas.github.io/Presigned-URL-AWS-UNITYGAME/
 
