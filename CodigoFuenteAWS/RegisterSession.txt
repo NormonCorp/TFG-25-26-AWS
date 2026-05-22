@@ -7,8 +7,10 @@ dynamodb = boto3.resource('dynamodb')
 table    = dynamodb.Table('PlayerStats')
 
 # Tras este tiempo sin heartbeat de SessionLastSeenAt, otra conexion puede
-# tomar el slot. La frescura la mantiene VerifyPlayerStats.
-STALE_SESSION_SECONDS = 10 * 60
+# tomar el slot. El heartbeat lo refrescan VerifyPlayerStats (al arrancar) y
+# SaveGameData (en cada guardado durante la partida), asi que una sesion
+# activa nunca queda stale; solo las zombies (crash, cierre forzado, red caida).
+STALE_SESSION_SECONDS = 90
 
 
 def lambda_handler(event, context):
@@ -41,9 +43,13 @@ def handle_register(user_id, body):
     now          = int(time.time())
     stale_cutoff = now - STALE_SESSION_SECONDS
 
-    # Check-and-set atomico. NO se acepta "SessionLastSeenAt no existe" como
-    # motivo para tomar el slot: cubria un bug del cliente que borraba el
-    # campo y permitia hijack del slot.
+    # Check-and-set atomico. Se puede tomar el slot si:
+    #  - no hay sesion activa, o el token esta vacio,
+    #  - el slot ya es mio (reclamo idempotente: evita auto-bloqueo si el
+    #    cliente reintenta el register con el mismo token),
+    #  - la sesion esta stale (sin heartbeat reciente -> sesion zombie).
+    # NO se acepta "SessionLastSeenAt no existe" como motivo para tomar el
+    # slot: cubria un bug del cliente que borraba el campo y permitia hijack.
     try:
         table.update_item(
             Key={'UserId': user_id},
@@ -55,6 +61,7 @@ def handle_register(user_id, body):
             ConditionExpression=(
                 "attribute_not_exists(ActiveSessionToken) "
                 "OR ActiveSessionToken = :empty "
+                "OR ActiveSessionToken = :t "
                 "OR SessionLastSeenAt < :stale"
             ),
             ExpressionAttributeValues={

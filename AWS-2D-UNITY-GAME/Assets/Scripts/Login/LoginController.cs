@@ -238,7 +238,14 @@ public class LoginController : MonoBehaviour
         else
         {
             Debug.LogError("Error en Login " + request.responseCode + ": " + request.downloadHandler.text);
-            if (errorText != null) errorText.text = "Error en Login " + request.responseCode + ": " + request.downloadHandler.text;
+            if (errorText != null)
+            {
+                string raw = request.downloadHandler.text;
+                if (raw != null && raw.Contains("disabled"))
+                    errorText.text = "Cuenta baneada permanentemente.";
+                else
+                    errorText.text = "Error en Login: usuario o contraseña incorrectos.";
+            }
         }
     }
 
@@ -362,6 +369,16 @@ public void Logout()
     void Start()
     {
        //PlayerPrefs.DeleteAll();
+
+        // Mensaje dejado por el kick (p.ej. ban) antes de volver al login.
+        string authMsg = PlayerPrefs.GetString("AuthMessage", "");
+        if (!string.IsNullOrEmpty(authMsg))
+        {
+            if (errorText != null) errorText.text = authMsg;
+            PlayerPrefs.DeleteKey("AuthMessage");
+            PlayerPrefs.Save();
+        }
+
         if (token)
         {
             // Al iniciar, si ya existe un token, saltamos el login directamente

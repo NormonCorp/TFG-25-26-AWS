@@ -116,6 +116,7 @@ public class DynamoDBManager : MonoBehaviour
                 PlayerPrefs.DeleteKey("CognitoIdToken");
                 PlayerPrefs.DeleteKey("CognitoAccessToken");
                 PlayerPrefs.DeleteKey("CognitoRefreshToken");
+                PlayerPrefs.SetString("AuthMessage", "Cuenta baneada permanentemente.");
                 SceneManager.LoadScene("LoginScene");
                 yield break;
             }
@@ -149,7 +150,7 @@ public class DynamoDBManager : MonoBehaviour
                 { "UserId", new AttributeValue { S = userId } }
             },
             UpdateExpression =
-                "SET Score = :s, TimePlayed = :t, IPAddress = :ip, LastUpdated = :lu",
+                "SET Score = :s, TimePlayed = :t, IPAddress = :ip, LastUpdated = :lu, SessionLastSeenAt = :now",
             ConditionExpression =
                 "ActiveSessionToken = :myToken",
             ExpressionAttributeValues = new Dictionary<string, AttributeValue>
@@ -158,6 +159,7 @@ public class DynamoDBManager : MonoBehaviour
                 { ":t",       new AttributeValue { N = timePlayed.ToString("F2", CultureInfo.InvariantCulture) } },
                 { ":ip",      new AttributeValue { S = _publicIP } },
                 { ":lu",      new AttributeValue { S = DateTime.UtcNow.ToString("o") } },
+                { ":now",     new AttributeValue { N = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture) } },
                 { ":myToken", new AttributeValue { S = _currentSessionToken } }
             }
         };
@@ -372,6 +374,7 @@ public class DynamoDBManager : MonoBehaviour
                     PlayerPrefs.DeleteKey("CognitoIdToken");
                     PlayerPrefs.DeleteKey("CognitoAccessToken");
                     PlayerPrefs.DeleteKey("CognitoRefreshToken");
+                    PlayerPrefs.SetString("AuthMessage", "Cuenta baneada permanentemente.");
                     SceneManager.LoadScene("LoginScene");
                     yield break;
                 }
