@@ -30,6 +30,14 @@ def handle_register(user_id, body):
     if not new_session_token:
         return api_response(400, "ERROR", "Falta el token.")
 
+    # Defensa en profundidad: corta a las cuentas baneadas antes de
+    # concederles el slot, sin esperar al verify de arranque.
+    existing = table.get_item(Key={'UserId': user_id}).get('Item')
+    if existing and existing.get('PermanentBan', False):
+        print(f"REGISTRO BLOQUEADO: {user_id} esta baneado permanentemente.")
+        return api_response(200, "PERMANENT_BANNED",
+                            "Cuenta baneada permanentemente.")
+
     now          = int(time.time())
     stale_cutoff = now - STALE_SESSION_SECONDS
 

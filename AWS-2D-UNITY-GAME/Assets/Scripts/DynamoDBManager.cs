@@ -108,6 +108,17 @@ public class DynamoDBManager : MonoBehaviour
                 SceneManager.LoadScene("LoginScene");
                 yield break;
             }
+            else if (response.code == "PERMANENT_BANNED")
+            {
+                Debug.LogError("Cuenta baneada permanentemente.");
+                _currentSessionToken = null;
+                SignOutAWS();
+                PlayerPrefs.DeleteKey("CognitoIdToken");
+                PlayerPrefs.DeleteKey("CognitoAccessToken");
+                PlayerPrefs.DeleteKey("CognitoRefreshToken");
+                SceneManager.LoadScene("LoginScene");
+                yield break;
+            }
             else if (response.code == "OK")
             {
                 Debug.Log("Tienes el control de la cuenta.");
@@ -353,7 +364,17 @@ public class DynamoDBManager : MonoBehaviour
                     SceneManager.LoadScene("LoginScene");
                     yield break;
                 }
-                else if (response.code == "PERMANENT_BANNED") Debug.LogError("Cuenta baneada permanentemente.");
+                else if (response.code == "PERMANENT_BANNED")
+                {
+                    Debug.LogError("Cuenta baneada permanentemente.");
+                    _currentSessionToken = null;
+                    SignOutAWS();
+                    PlayerPrefs.DeleteKey("CognitoIdToken");
+                    PlayerPrefs.DeleteKey("CognitoAccessToken");
+                    PlayerPrefs.DeleteKey("CognitoRefreshToken");
+                    SceneManager.LoadScene("LoginScene");
+                    yield break;
+                }
                 else if (response.code == "CHEAT_WARNING")    Debug.LogError("Aviso de trampa: stats reseteadas.");
                 else if (response.code == "FORCE_CLOUD")
                 {

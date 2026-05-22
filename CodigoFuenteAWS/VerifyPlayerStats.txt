@@ -75,7 +75,7 @@ def handle_verify_stats(event):
         if item.get('PermanentBan', False):
             revoke_cognito_access(user_id)
             force_sign_out(user_id)
-            return api_response(403, 'PERMANENT_BANNED', 'Acceso revocado permanentemente.')
+            return api_response(200, 'PERMANENT_BANNED', 'Acceso revocado permanentemente.')
 
         cheater_val = item.get('CheaterFlag', False)
         is_flagged  = cheater_val is True or str(cheater_val).lower() == 'true'
@@ -226,7 +226,7 @@ def handle_cheat_detection(user_id, motivo, already_flagged=False):
         revoke_cognito_access(user_id)
         force_sign_out(user_id)
         print(f"=== BAN PERMANENTE: {user_id} | Motivo: {motivo} ===")
-        return api_response(403, 'PERMANENT_BANNED', f'Baneo definitivo: {motivo}')
+        return api_response(200, 'PERMANENT_BANNED', f'Baneo definitivo: {motivo}')
 
     table.update_item(
         Key={'UserId': user_id},
