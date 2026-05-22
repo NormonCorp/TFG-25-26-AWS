@@ -21,6 +21,11 @@ public class SessionTelemetryRecorder : MonoBehaviour
     private SessionTelemetry data;
     private float nextAutosaveTime;
 
+    // Hasta que la nube no haya respondido y aplicado el score real, no
+    // contamos saltos ni guardamos: si no, el spam de espacio sobrescribe
+    // el score de la nube con un valor pequeño antes de leerlo.
+    private bool cloudReady = false;
+
     private readonly Queue<float> last10s = new Queue<float>();
     private readonly Queue<float> last60s = new Queue<float>();
 
@@ -73,6 +78,11 @@ public class SessionTelemetryRecorder : MonoBehaviour
                 }
             });
         }
+        else
+        {
+            // Sin backend (offline/editor sin configurar): juega de inmediato.
+            cloudReady = true;
+        }
 
         if (playerJump != null) playerJump.OnJump += OnRealJump;
         UpdateDerivedStats();
@@ -123,6 +133,7 @@ public class SessionTelemetryRecorder : MonoBehaviour
             statsManager.ApplyCloudStats(puntosNube, tiempoNube);
         }
 
+        cloudReady = true;
         UpdateDebugUI();
     }
 
@@ -169,7 +180,7 @@ public class SessionTelemetryRecorder : MonoBehaviour
         UpdateDerivedStats();
         UpdateDebugUI();
 
-        if (dbManager != null && Keyboard.current != null && Keyboard.current.spaceKey.wasPressedThisFrame)
+        if (cloudReady && dbManager != null && Keyboard.current != null && Keyboard.current.spaceKey.wasPressedThisFrame)
         {
             dbManager.SaveGameData(data.score, data.timePlayedSeconds);
         }
@@ -177,12 +188,17 @@ public class SessionTelemetryRecorder : MonoBehaviour
 
     private void OnApplicationQuit()
     {
-        if (dbManager != null) dbManager.SaveGameData(data.score, data.timePlayedSeconds);
+        // No guardar si la nube aún no respondió: data.score seguiría en 0
+        // y machacaría el progreso real.
+        if (cloudReady && dbManager != null) dbManager.SaveGameData(data.score, data.timePlayedSeconds);
         SaveToDisk(false);
     }
 
     private void OnRealJump()
     {
+        // Ignora saltos previos a la carga de la nube: no deben puntuar.
+        if (!cloudReady) return;
+
         data.score++;
         data.validKeyCount++;
 
