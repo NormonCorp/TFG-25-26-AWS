@@ -56,7 +56,9 @@ def handle_register(user_id, body):
             UpdateExpression=(
                 "SET ActiveSessionToken = :t, "
                 "SessionStartedAt = :now, "
-                "SessionLastSeenAt = :now"
+                "SessionLastSeenAt = :now "
+                "REMOVE SessionIntrusionAttemptAt, "
+                "SessionIntrusionNoticeId"
             ),
             ConditionExpression=(
                 "attribute_not_exists(ActiveSessionToken) "
@@ -74,12 +76,40 @@ def handle_register(user_id, body):
     except ClientError as e:
         if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
             print(f"INTRUSO BLOQUEADO: {user_id} intento entrar desde otro PC.")
+            notify_active_session(user_id, new_session_token, now, stale_cutoff)
             return api_response(200, "SESSION_IN_USE",
                                 "Ya hay una partida en curso en otro dispositivo.")
         print(f"register error: {e}")
         return api_response(500, "ERROR", "Error interno del servidor.")
 
     return api_response(200, "OK", "Sesion registrada.")
+
+
+def notify_active_session(user_id, blocked_token, now, stale_cutoff):
+    try:
+        table.update_item(
+            Key={'UserId': user_id},
+            UpdateExpression=(
+                "SET SessionIntrusionAttemptAt = :now, "
+                "SessionIntrusionNoticeId = :notice"
+            ),
+            ConditionExpression=(
+                "attribute_exists(ActiveSessionToken) "
+                "AND ActiveSessionToken <> :empty "
+                "AND ActiveSessionToken <> :blocked "
+                "AND SessionLastSeenAt >= :stale"
+            ),
+            ExpressionAttributeValues={
+                ':now': now,
+                ':notice': f"{now}:{blocked_token}",
+                ':empty': "",
+                ':blocked': blocked_token,
+                ':stale': stale_cutoff,
+            }
+        )
+    except ClientError as e:
+        if e.response['Error']['Code'] != 'ConditionalCheckFailedException':
+            print(f"No se pudo notificar intento de intrusion para {user_id}: {e}")
 
 
 def handle_unregister(user_id, body):
@@ -93,24 +123,51 @@ def handle_unregister(user_id, body):
         return api_response(200, "IGNORED",
                             "Falta el token de sesion. Se ignora la peticion.")
 
+    now          = int(time.time())
+    stale_cutoff = now - STALE_SESSION_SECONDS
+
+    # Se libera el slot si se cumple CUALQUIERA de estas:
+    #   1. El cliente posee el token actual (caso normal: el dueno cierra).
+    #   2. El slot ya esta vacio / no existe (idempotente, evita 500 raros).
+    #   3. El token guardado es zombie (sin heartbeat hace > STALE segs).
+    # La (3) es la clave del bug del "doble jugador": cuando un conflicto
+    # deja un token huerfano (p.ej. el intruso tomo el slot por stale y luego
+    # se fue sin unregister), el siguiente cliente legitimo de la misma
+    # cuenta Cognito puede limpiarlo en vez de esperar otros 90 s.
+    # Sigue siendo seguro: si el token de DB esta fresco y no es el tuyo,
+    # la condicion falla y no se toca nada -> nadie puede tirar la sesion
+    # viva de otro PC.
     try:
         table.update_item(
             Key={'UserId': user_id},
-            UpdateExpression="SET ActiveSessionToken = :empty",
-            ConditionExpression="ActiveSessionToken = :t",
+            UpdateExpression=(
+                "REMOVE ActiveSessionToken, "
+                "SessionStartedAt, "
+                "SessionLastSeenAt"
+            ),
+            ConditionExpression=(
+                "attribute_not_exists(ActiveSessionToken) "
+                "OR ActiveSessionToken = :empty "
+                "OR ActiveSessionToken = :t "
+                "OR SessionLastSeenAt < :stale"
+            ),
             ExpressionAttributeValues={
                 ':empty': "",
                 ':t':     client_token,
+                ':stale': stale_cutoff,
             }
         )
+        print(f"unregister OK para {user_id}. Slot liberado.")
         return api_response(200, "OK", "Cuenta liberada correctamente.")
 
     except ClientError as e:
-        # Idempotente: si el token no coincide o el slot ya estaba vacio,
-        # no se toca la fila y se responde 200.
+        # Solo se llega aqui si el slot esta fresco con un token distinto:
+        # no es tuyo y no es zombie. No se toca nada.
         if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
+            print(f"unregister ALREADY_FREE para {user_id} "
+                  f"(slot fresco con token distinto).")
             return api_response(200, "ALREADY_FREE",
-                                "El slot ya estaba libre o pertenece a otra sesion.")
+                                "El slot pertenece a otra sesion activa.")
         print(f"unregister error: {e}")
         return api_response(500, "ERROR", "Error interno del servidor.")
 

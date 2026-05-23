@@ -1,7 +1,8 @@
-import { DynamoDBClient, GetItemCommand } from "@aws-sdk/client-dynamodb";
+import { DynamoDBClient, GetItemCommand, UpdateItemCommand } from "@aws-sdk/client-dynamodb";
 
-const client     = new DynamoDBClient({});
-const TABLE_NAME = "HistoricExeHashes";
+const client           = new DynamoDBClient({});
+const TABLE_NAME       = "HistoricExeHashes";
+const PLAYER_STATS_TBL = "PlayerStats";
 
 export const handler = async (event) => {
     try {
@@ -17,6 +18,18 @@ export const handler = async (event) => {
             return apiResponse(400, "MISSING_HASH", "clientHash requerido.");
         }
 
+        // userName puede venir por dos vias:
+        //  1. Authorizer Cognito (preferido, no falsificable por el cliente).
+        //  2. Body, como fallback si la ruta es publica.
+        // Esto permite que el borrado del slot funcione incluso si VerifyGameHash
+        // se invoca sin token (p.ej. comprobacion de version pre-login).
+        const userName =
+            event?.requestContext?.authorizer?.claims?.["cognito:username"]
+            || body?.userName
+            || body?.userId
+            || null;
+        console.log(`VerifyGameHash: userName resuelto = ${userName ?? "(vacio)"}`);
+
         // Logueamos solo los primeros 12 chars del hash: suficiente para
         // identificar la build sin spamear los logs.
         const shortHash = clientHash.slice(0, 12);
@@ -29,6 +42,7 @@ export const handler = async (event) => {
 
         if (!result.Item) {
             console.log(`DENIED hash=${shortHash}... (no esta registrado)`);
+            await clearActiveSession(userName);
             return apiResponse(403, "DENIED",
                                "Esta version no esta autorizada.");
         }
@@ -40,6 +54,7 @@ export const handler = async (event) => {
             return apiResponse(200, "OK", "Version actual.");
         }
 
+        await clearActiveSession(userName);
         return apiResponse(426, "UPDATE_REQUIRED",
                            "Tu version no es la mas reciente, actualiza el juego.");
 
@@ -48,6 +63,26 @@ export const handler = async (event) => {
         return apiResponse(500, "ERROR", "Error interno del servidor.");
     }
 };
+
+// Si el hash no es vigente, liberamos el slot de sesion activa para que el
+// usuario no quede bloqueado tras reinstalar/actualizar el juego.
+async function clearActiveSession(userName) {
+    if (!userName) {
+        console.warn("clearActiveSession: userName vacio, no se borra nada");
+        return;
+    }
+    try {
+        await client.send(new UpdateItemCommand({
+            TableName: PLAYER_STATS_TBL,
+            Key: { UserId: { S: userName } },
+            UpdateExpression: "SET ActiveSessionToken = :empty",
+            ExpressionAttributeValues: { ":empty": { S: "" } }
+        }));
+        console.log(`clearActiveSession OK para ${userName}`);
+    } catch (err) {
+        console.error(`clearActiveSession error para ${userName}:`, err);
+    }
+}
 
 function apiResponse(statusCode, code, message, extra = {}) {
     return {

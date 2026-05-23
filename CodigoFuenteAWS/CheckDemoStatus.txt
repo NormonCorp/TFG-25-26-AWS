@@ -2,14 +2,17 @@ import { DynamoDBClient, GetItemCommand, UpdateItemCommand } from "@aws-sdk/clie
 
 const client = new DynamoDBClient({});
 
-const TABLE_NAME      = "DemoAccess";
+const TABLE_NAME       = "DemoAccess";
+const PLAYER_STATS_TBL = "PlayerStats";
 const DEFAULT_PLAY    = 2 * 60 * 60;   // 2h en segundos
 const DEFAULT_WINDOW  = 24 * 60 * 60;  // ventana de 24h desde primer login
 const MAX_DELTA       = 300;           // tope de delta por llamada (5 min)
 
 export const handler = async (event) => {
     try {
-        const userId = event?.requestContext?.authorizer?.claims?.sub;
+        const claims   = event?.requestContext?.authorizer?.claims;
+        const userId   = claims?.sub;
+        const userName = claims?.["cognito:username"];
         if (!userId) {
             return apiResponse(401, "UNAUTHORIZED", "Token Cognito ausente.");
         }
@@ -57,6 +60,7 @@ export const handler = async (event) => {
             const exp = parseInt(item.expirationEpoch.N, 10);
             if (now > exp) {
                 console.log(`Date expired: ${now} > ${exp} (user=${userId})`);
+                await clearActiveSession(userName);
                 return apiResponse(403, "EXPIRED", "Demo caducada por fecha.");
             }
         }
@@ -90,6 +94,7 @@ export const handler = async (event) => {
                         ":l": { N: now.toString() }
                     }
                 }));
+                await clearActiveSession(userName);
                 return apiResponse(403, "TIME_LIMIT_REACHED",
                                    "Tiempo de demo agotado.");
             }
@@ -118,6 +123,27 @@ export const handler = async (event) => {
         return apiResponse(500, "ERROR", "Error interno del servidor.");
     }
 };
+
+// Limpia el slot de sesion activa cuando se deniega el acceso a la demo,
+// para que el cliente pueda volver a entrar tras renovar/comprar acceso
+// sin quedar bloqueado por su propio token "fantasma".
+async function clearActiveSession(userName) {
+    if (!userName) {
+        console.warn("clearActiveSession: userName vacio, no se borra nada");
+        return;
+    }
+    try {
+        await client.send(new UpdateItemCommand({
+            TableName: PLAYER_STATS_TBL,
+            Key: { UserId: { S: userName } },
+            UpdateExpression: "SET ActiveSessionToken = :empty",
+            ExpressionAttributeValues: { ":empty": { S: "" } }
+        }));
+        console.log(`clearActiveSession OK para ${userName}`);
+    } catch (err) {
+        console.error(`clearActiveSession error para ${userName}:`, err);
+    }
+}
 
 function apiResponse(statusCode, code, message, extra = {}) {
     return {

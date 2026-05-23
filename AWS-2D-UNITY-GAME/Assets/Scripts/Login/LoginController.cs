@@ -311,20 +311,27 @@ public class LoginController : MonoBehaviour
     }
 
     // Método para cerrar sesión manualmente
-public void Logout()
+    public void Logout()
     {
-        // 1. Limpiar tus PlayerPrefs (lo que ya tenías)
+        StartCoroutine(LogoutRoutine());
+    }
+
+    private IEnumerator LogoutRoutine()
+    {
+        if (DynamoDBManager.Instance != null)
+        {
+            bool unregisterFinished = false;
+            DynamoDBManager.Instance.UnregisterCurrentSession(() => unregisterFinished = true);
+            yield return new WaitUntil(() => unregisterFinished);
+            DynamoDBManager.Instance.SignOutAWS();
+        }
+
         PlayerPrefs.DeleteKey("CognitoIdToken");
         PlayerPrefs.DeleteKey("CognitoAccessToken");
         PlayerPrefs.DeleteKey("CognitoUsername");
         PlayerPrefs.DeleteKey("CognitoUserId");
         PlayerPrefs.DeleteKey("CognitoRefreshToken");
-        
-        // 2. NUEVO: Limpiar la caché interna del SDK de AWS
-        if (DynamoDBManager.Instance != null)
-        {
-            DynamoDBManager.Instance.SignOutAWS();
-        }
+        PlayerPrefs.Save();
 
         Debug.Log("Sesión cerrada completamente.");
         SceneManager.LoadScene("LoginScene");

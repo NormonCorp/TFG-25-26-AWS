@@ -30,6 +30,9 @@ public class DynamoDBManager : MonoBehaviour
 
     // ticket sesion actual
     private string _currentSessionToken;
+    private string _currentIdToken;
+    private string _currentUserId;
+    private string _lastIntrusionNoticeId;
     private IAmazonDynamoDB _ddbClient;
     private CognitoAWSCredentials _credentials;
     private string _publicIP = "Unknown";
@@ -79,7 +82,12 @@ public class DynamoDBManager : MonoBehaviour
         string idToken = PlayerPrefs.GetString("CognitoIdToken");
         if (string.IsNullOrEmpty(idToken)) return;
 
+        _currentIdToken = idToken;
+        _currentUserId = GetPlayerStatsUserId(idToken);
         _currentSessionToken = Guid.NewGuid().ToString();
+        _lastIntrusionNoticeId = null;
+        _unregisterDone = false;
+        _isQuitting = false;
 
         string jsonPayload = $"{{\"action\":\"register\", \"sessionToken\":\"{_currentSessionToken}\"}}";
         StartCoroutine(SendRegisterSession(jsonPayload, idToken, onSessionRegistered));
@@ -103,7 +111,7 @@ public class DynamoDBManager : MonoBehaviour
             if (response.code == "SESSION_IN_USE")
             {
                 Debug.LogError("ACCESO DENEGADO: Tu cuenta ya está jugando en otro dispositivo.");
-                _currentSessionToken = null;
+                ClearSessionState();
                 PlayerPrefs.DeleteKey("CognitoIdToken");
                 SceneManager.LoadScene("LoginScene");
                 yield break;
@@ -111,7 +119,7 @@ public class DynamoDBManager : MonoBehaviour
             else if (response.code == "PERMANENT_BANNED")
             {
                 Debug.LogError("Cuenta baneada permanentemente.");
-                _currentSessionToken = null;
+                ClearSessionState();
                 SignOutAWS();
                 PlayerPrefs.DeleteKey("CognitoIdToken");
                 PlayerPrefs.DeleteKey("CognitoAccessToken");
@@ -135,12 +143,12 @@ public class DynamoDBManager : MonoBehaviour
     // que solo el dueño del slot puede escribir (ActiveSessionToken == el mio).
     public void SaveGameData(int score, float timePlayed)
     {
-        string idToken  = PlayerPrefs.GetString("CognitoIdToken");
-        string userId   = GetPlayerStatsUserId(idToken);
+        string idToken  = GetActiveIdToken();
+        string userId   = GetActiveUserId(idToken);
 
+        if (string.IsNullOrEmpty(_currentSessionToken)) return;
         if (string.IsNullOrEmpty(idToken)) return;
         if (_ddbClient == null) InitClient(idToken);
-        if (string.IsNullOrEmpty(_currentSessionToken)) return;
 
         var request = new UpdateItemRequest
         {
@@ -171,7 +179,7 @@ public class DynamoDBManager : MonoBehaviour
                 if (result.Exception.Message.Contains("ConditionalCheckFailed") || result.Exception is ConditionalCheckFailedException)
                 {
                     Debug.LogError("SESIÓN CADUCADA DURANTE EL GUARDADO.");
-                    _currentSessionToken = null;
+                    ClearSessionState();
                     PlayerPrefs.DeleteKey("CognitoIdToken");
                     SceneManager.LoadScene("LoginScene");
                 }
@@ -189,8 +197,8 @@ public class DynamoDBManager : MonoBehaviour
 
     public void LoadData(Action<int, float> onLoadedCallback)
     {
-        string idToken  = PlayerPrefs.GetString("CognitoIdToken");
-        string userId   = GetPlayerStatsUserId(idToken);
+        string idToken  = GetActiveIdToken();
+        string userId   = GetActiveUserId(idToken);
 
         if (string.IsNullOrEmpty(idToken)) return;
         if (_ddbClient == null) InitClient(idToken);
@@ -232,8 +240,49 @@ public class DynamoDBManager : MonoBehaviour
 
     public string GetCurrentPlayerStatsUserId()
     {
-        string idToken = PlayerPrefs.GetString("CognitoIdToken");
-        return GetPlayerStatsUserId(idToken);
+        return GetActiveUserId(GetActiveIdToken());
+    }
+
+    public string GetCurrentIdToken()
+    {
+        return GetActiveIdToken();
+    }
+
+    public void CheckIntrusionNotice(Action onIntrusionDetected)
+    {
+        string idToken = GetActiveIdToken();
+        string userId = GetActiveUserId(idToken);
+
+        if (string.IsNullOrEmpty(idToken)) return;
+        if (string.IsNullOrEmpty(_currentSessionToken)) return;
+        if (_ddbClient == null) InitClient(idToken);
+
+        var request = new GetItemRequest
+        {
+            TableName = TableName,
+            Key = new Dictionary<string, AttributeValue>
+            {
+                { "UserId", new AttributeValue { S = userId } }
+            },
+            ProjectionExpression = "SessionIntrusionNoticeId"
+        };
+
+        _ddbClient.GetItemAsync(request, (result) =>
+        {
+            if (result.Exception != null)
+            {
+                Debug.LogWarning("No se pudo comprobar aviso de intrusion: " + result.Exception.Message);
+                return;
+            }
+
+            if (result.Response == null || result.Response.Item == null) return;
+            if (!result.Response.Item.TryGetValue("SessionIntrusionNoticeId", out AttributeValue notice)) return;
+            if (string.IsNullOrEmpty(notice.S)) return;
+            if (notice.S == _lastIntrusionNoticeId) return;
+
+            _lastIntrusionNoticeId = notice.S;
+            onIntrusionDetected?.Invoke();
+        });
     }
 
     private string GetPlayerStatsUserId(string idToken)
@@ -250,6 +299,33 @@ public class DynamoDBManager : MonoBehaviour
         }
 
         return PlayerPrefs.GetString("CognitoUsername", "UnknownUser");
+    }
+
+    private string GetActiveIdToken()
+    {
+        if (!string.IsNullOrEmpty(_currentIdToken)) return _currentIdToken;
+        return PlayerPrefs.GetString("CognitoIdToken");
+    }
+
+    private string GetActiveUserId(string idToken)
+    {
+        if (!string.IsNullOrEmpty(_currentUserId)) return _currentUserId;
+
+        string userId = GetPlayerStatsUserId(idToken);
+        if (!string.IsNullOrEmpty(userId) && userId != "UnknownUser")
+        {
+            _currentUserId = userId;
+        }
+
+        return userId;
+    }
+
+    private void ClearSessionState()
+    {
+        _currentSessionToken = null;
+        _currentIdToken = null;
+        _currentUserId = null;
+        _lastIntrusionNoticeId = null;
     }
 
     public void SignOutAWS()
@@ -302,7 +378,7 @@ public class DynamoDBManager : MonoBehaviour
 
     public void VerifyDataAtStartup(string envelopeJson, Action onVerificationDone, Action<int, float> onForceCloud = null)
     {
-        string idToken = PlayerPrefs.GetString("CognitoIdToken");
+        string idToken = GetActiveIdToken();
         if (string.IsNullOrEmpty(idToken))
         {
             onVerificationDone?.Invoke();
@@ -359,7 +435,7 @@ public class DynamoDBManager : MonoBehaviour
                 if (response.code == "SESSION_EXPIRED")
                 {
                     Debug.LogError("SESIÓN CADUCADA.");
-                    _currentSessionToken = null;
+                    ClearSessionState();
                     PlayerPrefs.DeleteKey("CognitoIdToken");
                     PlayerPrefs.DeleteKey("CognitoAccessToken");
                     PlayerPrefs.DeleteKey("CognitoRefreshToken");
@@ -369,7 +445,7 @@ public class DynamoDBManager : MonoBehaviour
                 else if (response.code == "PERMANENT_BANNED")
                 {
                     Debug.LogError("Cuenta baneada permanentemente.");
-                    _currentSessionToken = null;
+                    ClearSessionState();
                     SignOutAWS();
                     PlayerPrefs.DeleteKey("CognitoIdToken");
                     PlayerPrefs.DeleteKey("CognitoAccessToken");
@@ -415,7 +491,7 @@ public class DynamoDBManager : MonoBehaviour
     {
         if (_unregisterDone) return true;
 
-        string idToken = PlayerPrefs.GetString("CognitoIdToken");
+        string idToken = GetActiveIdToken();
         if (string.IsNullOrEmpty(idToken) || string.IsNullOrEmpty(_currentSessionToken))
         {
             // Nada que liberar.
@@ -425,12 +501,30 @@ public class DynamoDBManager : MonoBehaviour
         if (!_isQuitting)
         {
             _isQuitting = true;
-            StartCoroutine(UnregisterAndQuit(idToken, _currentSessionToken));
+            StartCoroutine(SendUnregisterSession(idToken, _currentSessionToken, null, true));
         }
         return false; // Aborta el quit; lo relanzamos cuando termine.
     }
 
-    private IEnumerator UnregisterAndQuit(string idToken, string sessionToken)
+    public void UnregisterCurrentSession(Action onFinished = null)
+    {
+        if (_unregisterDone)
+        {
+            onFinished?.Invoke();
+            return;
+        }
+
+        string idToken = GetActiveIdToken();
+        if (string.IsNullOrEmpty(idToken) || string.IsNullOrEmpty(_currentSessionToken))
+        {
+            onFinished?.Invoke();
+            return;
+        }
+
+        StartCoroutine(SendUnregisterSession(idToken, _currentSessionToken, onFinished, false));
+    }
+
+    private IEnumerator SendUnregisterSession(string idToken, string sessionToken, Action onFinished, bool quitAfter)
     {
         Debug.Log("Liberando la cuenta en AWS...");
 
@@ -453,11 +547,21 @@ public class DynamoDBManager : MonoBehaviour
         }
         else
         {
-            Debug.Log("Slot liberado correctamente.");
+            Debug.Log("Respuesta unregister: " + request.downloadHandler.text);
         }
 
         _unregisterDone = true;
-        Application.Quit();
+        if (_currentSessionToken == sessionToken)
+        {
+            ClearSessionState();
+        }
+
+        onFinished?.Invoke();
+
+        if (quitAfter)
+        {
+            Application.Quit();
+        }
     }
 }
 

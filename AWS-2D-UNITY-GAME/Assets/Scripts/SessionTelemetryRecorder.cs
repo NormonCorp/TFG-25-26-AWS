@@ -1,9 +1,14 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
 using TMPro;
 using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.UI;
+using UnityEngine.EventSystems;
+using UnityEngine.SceneManagement;
+using UnityEngine.UI;
 
 public class SessionTelemetryRecorder : MonoBehaviour
 {
@@ -18,13 +23,23 @@ public class SessionTelemetryRecorder : MonoBehaviour
     public float autosaveEverySeconds = 15f;
     public string fileNamePrefix = "session_telemetry_";
 
+    [Header("Security")]
+    public float intrusionCheckEverySeconds = 3f;
+
     private SessionTelemetry data;
     private float nextAutosaveTime;
+    private float nextIntrusionCheckTime;
+    private const string CurrentSaveFileName = "session_telemetry.json";
 
     // Hasta que la nube no haya respondido y aplicado el score real, no
     // contamos saltos ni guardamos: si no, el spam de espacio sobrescribe
     // el score de la nube con un valor pequeño antes de leerlo.
     private bool cloudReady = false;
+    private bool exitRequested = false;
+    private Canvas overlayCanvas;
+    private CanvasGroup intrusionNoticeGroup;
+    private TextMeshProUGUI intrusionNoticeText;
+    private Coroutine intrusionNoticeRoutine;
 
     private readonly Queue<float> last10s = new Queue<float>();
     private readonly Queue<float> last60s = new Queue<float>();
@@ -58,6 +73,8 @@ public class SessionTelemetryRecorder : MonoBehaviour
             score             = 0,
             timePlayedSeconds = 0
         };
+        nextAutosaveTime = Time.realtimeSinceStartup + autosaveEverySeconds;
+        nextIntrusionCheckTime = Time.realtimeSinceStartup + intrusionCheckEverySeconds;
 
         if (dbManager == null) dbManager = DynamoDBManager.Instance;
         data.userId = GetCurrentUserId();
@@ -85,6 +102,7 @@ public class SessionTelemetryRecorder : MonoBehaviour
         }
 
         if (playerJump != null) playerJump.OnJump += OnRealJump;
+        CreateExitButton();
         UpdateDerivedStats();
         UpdateDebugUI();
     }
@@ -142,6 +160,9 @@ public class SessionTelemetryRecorder : MonoBehaviour
         string dir = GetSavePath();
         if (!Directory.Exists(dir)) return null;
 
+        string currentSave = GetCurrentLocalSavePath();
+        if (File.Exists(currentSave)) return currentSave;
+
         string[] files = Directory.GetFiles(dir, fileNamePrefix + "*.json");
         if (files.Length == 0) return null;
 
@@ -180,10 +201,191 @@ public class SessionTelemetryRecorder : MonoBehaviour
         UpdateDerivedStats();
         UpdateDebugUI();
 
+        if (!exitRequested && Keyboard.current != null && Keyboard.current.escapeKey.wasPressedThisFrame)
+        {
+            ReturnToLogin();
+            return;
+        }
+
+        if (autosave && cloudReady && dbManager != null && Time.realtimeSinceStartup >= nextAutosaveTime)
+        {
+            nextAutosaveTime = Time.realtimeSinceStartup + autosaveEverySeconds;
+            dbManager.SaveGameData(data.score, data.timePlayedSeconds);
+        }
+
+        if (cloudReady && dbManager != null && Time.realtimeSinceStartup >= nextIntrusionCheckTime)
+        {
+            nextIntrusionCheckTime = Time.realtimeSinceStartup + intrusionCheckEverySeconds;
+            dbManager.CheckIntrusionNotice(ShowIntrusionNotice);
+        }
+
         if (cloudReady && dbManager != null && Keyboard.current != null && Keyboard.current.spaceKey.wasPressedThisFrame)
         {
             dbManager.SaveGameData(data.score, data.timePlayedSeconds);
         }
+    }
+
+    private void ReturnToLogin()
+    {
+        exitRequested = true;
+
+        if (DynamoDBManager.Instance != null)
+        {
+            DynamoDBManager.Instance.UnregisterCurrentSession(() =>
+            {
+                DynamoDBManager.Instance.SignOutAWS();
+                ClearAuthPrefs();
+                SceneManager.LoadScene("LoginScene");
+            });
+            return;
+        }
+
+        ClearAuthPrefs();
+        SceneManager.LoadScene("LoginScene");
+    }
+
+    private void QuitGame()
+    {
+        if (exitRequested) return;
+        exitRequested = true;
+        Application.Quit();
+    }
+
+    private void ClearAuthPrefs()
+    {
+        PlayerPrefs.DeleteKey("CognitoIdToken");
+        PlayerPrefs.DeleteKey("CognitoAccessToken");
+        PlayerPrefs.DeleteKey("CognitoUsername");
+        PlayerPrefs.DeleteKey("CognitoUserId");
+        PlayerPrefs.DeleteKey("CognitoRefreshToken");
+        PlayerPrefs.Save();
+    }
+
+    private void CreateExitButton()
+    {
+        GameObject canvasObject = new GameObject("ExitOverlayCanvas", typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
+        overlayCanvas = canvasObject.GetComponent<Canvas>();
+        overlayCanvas.renderMode = RenderMode.ScreenSpaceOverlay;
+        overlayCanvas.sortingOrder = 1000;
+
+        CanvasScaler scaler = canvasObject.GetComponent<CanvasScaler>();
+        scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+        scaler.referenceResolution = new Vector2(1920f, 1080f);
+        scaler.matchWidthOrHeight = 0.5f;
+
+        if (FindFirstObjectByType<EventSystem>() == null)
+        {
+            new GameObject("EventSystem", typeof(EventSystem), typeof(InputSystemUIInputModule));
+        }
+
+        GameObject buttonObject = new GameObject("SalirButton", typeof(RectTransform), typeof(Image), typeof(Button));
+        buttonObject.transform.SetParent(overlayCanvas.transform, false);
+
+        RectTransform rect = buttonObject.GetComponent<RectTransform>();
+        rect.anchorMin = new Vector2(1f, 1f);
+        rect.anchorMax = new Vector2(1f, 1f);
+        rect.pivot = new Vector2(1f, 1f);
+        rect.anchoredPosition = new Vector2(-24f, -24f);
+        rect.sizeDelta = new Vector2(130f, 44f);
+
+        Image image = buttonObject.GetComponent<Image>();
+        image.color = new Color(0.78f, 0.08f, 0.08f, 1f);
+
+        Button button = buttonObject.GetComponent<Button>();
+        ColorBlock colors = button.colors;
+        colors.normalColor = new Color(0.78f, 0.08f, 0.08f, 1f);
+        colors.highlightedColor = new Color(0.92f, 0.12f, 0.12f, 1f);
+        colors.pressedColor = new Color(0.55f, 0.04f, 0.04f, 1f);
+        colors.selectedColor = colors.highlightedColor;
+        button.colors = colors;
+        button.onClick.AddListener(QuitGame);
+
+        GameObject textObject = new GameObject("Text", typeof(RectTransform), typeof(TextMeshProUGUI));
+        textObject.transform.SetParent(buttonObject.transform, false);
+
+        RectTransform textRect = textObject.GetComponent<RectTransform>();
+        textRect.anchorMin = Vector2.zero;
+        textRect.anchorMax = Vector2.one;
+        textRect.offsetMin = Vector2.zero;
+        textRect.offsetMax = Vector2.zero;
+
+        TextMeshProUGUI text = textObject.GetComponent<TextMeshProUGUI>();
+        text.text = "Salir";
+        text.color = Color.white;
+        text.fontSize = 24f;
+        text.fontStyle = FontStyles.Bold;
+        text.alignment = TextAlignmentOptions.Center;
+        text.raycastTarget = false;
+    }
+
+    private void ShowIntrusionNotice()
+    {
+        if (intrusionNoticeGroup == null) CreateIntrusionNoticeText();
+
+        if (intrusionNoticeRoutine != null)
+        {
+            StopCoroutine(intrusionNoticeRoutine);
+        }
+
+        intrusionNoticeRoutine = StartCoroutine(ShowIntrusionNoticeRoutine());
+    }
+
+    private void CreateIntrusionNoticeText()
+    {
+        if (overlayCanvas == null) CreateExitButton();
+
+        GameObject noticeObject = new GameObject("IntrusionNotice", typeof(RectTransform), typeof(CanvasGroup), typeof(Image));
+        noticeObject.transform.SetParent(overlayCanvas.transform, false);
+
+        RectTransform rect = noticeObject.GetComponent<RectTransform>();
+        rect.anchorMin = new Vector2(0.5f, 1f);
+        rect.anchorMax = new Vector2(0.5f, 1f);
+        rect.pivot = new Vector2(0.5f, 1f);
+        rect.anchoredPosition = new Vector2(0f, -82f);
+        rect.sizeDelta = new Vector2(720f, 58f);
+
+        Image background = noticeObject.GetComponent<Image>();
+        background.color = new Color(0.95f, 0.18f, 0.08f, 0.9f);
+
+        intrusionNoticeGroup = noticeObject.GetComponent<CanvasGroup>();
+        intrusionNoticeGroup.alpha = 0f;
+        intrusionNoticeGroup.blocksRaycasts = false;
+        intrusionNoticeGroup.interactable = false;
+
+        GameObject textObject = new GameObject("Text", typeof(RectTransform), typeof(TextMeshProUGUI));
+        textObject.transform.SetParent(noticeObject.transform, false);
+
+        RectTransform textRect = textObject.GetComponent<RectTransform>();
+        textRect.anchorMin = Vector2.zero;
+        textRect.anchorMax = Vector2.one;
+        textRect.offsetMin = new Vector2(18f, 0f);
+        textRect.offsetMax = new Vector2(-18f, 0f);
+
+        intrusionNoticeText = textObject.GetComponent<TextMeshProUGUI>();
+        intrusionNoticeText.text = "Se están intentando meter en tu cuenta.";
+        intrusionNoticeText.color = Color.white;
+        intrusionNoticeText.fontSize = 28f;
+        intrusionNoticeText.fontStyle = FontStyles.Bold;
+        intrusionNoticeText.alignment = TextAlignmentOptions.Center;
+        intrusionNoticeText.raycastTarget = false;
+    }
+
+    private IEnumerator ShowIntrusionNoticeRoutine()
+    {
+        intrusionNoticeGroup.alpha = 1f;
+
+        yield return new WaitForSeconds(3.5f);
+
+        const float fadeSeconds = 1.5f;
+        float elapsed = 0f;
+        while (elapsed < fadeSeconds)
+        {
+            elapsed += Time.deltaTime;
+            intrusionNoticeGroup.alpha = Mathf.Lerp(1f, 0f, elapsed / fadeSeconds);
+            yield return null;
+        }
+
+        intrusionNoticeGroup.alpha = 0f;
     }
 
     private void OnApplicationQuit()
@@ -258,14 +460,10 @@ public class SessionTelemetryRecorder : MonoBehaviour
         data.userId = GetCurrentUserId();
         data.lastSavedAtUtc = DateTime.UtcNow.ToString("o");
 
-        string timestamp    = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
-        string shortSession = data.sessionId.Substring(0, 6);
-        string fileName     = $"{fileNamePrefix}{timestamp}_{shortSession}.json";
-
         string dir = GetSavePath();
         if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
 
-        string path = Path.Combine(dir, fileName);
+        string path = GetCurrentLocalSavePath();
 
         // 1. Datos en bruto
         string rawDataJson = JsonUtility.ToJson(data, prettyPrint: true);
@@ -303,6 +501,11 @@ public class SessionTelemetryRecorder : MonoBehaviour
         string baseDir = Path.Combine(Application.persistentDataPath, "session_telemetry");
 #endif
         return Path.Combine(baseDir, GetSafeUserFolderName());
+    }
+
+    private string GetCurrentLocalSavePath()
+    {
+        return Path.Combine(GetSavePath(), CurrentSaveFileName);
     }
 
     private string GetCurrentUserId()

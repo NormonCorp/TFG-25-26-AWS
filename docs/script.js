@@ -115,12 +115,10 @@ function getDownloadLink() {
         console.error('Error:', error);
         msg.innerText = error.message;
         msg.style.color = "#ff6b6b";
-        btn.disabled = false;
-        btn.innerText = "Reintentar";
-        
-        if (error.message.includes("No autorizado")) {
-            setTimeout(logout, 2000);
-        }
+        btn.disabled = true;
+        btn.innerText = "Sesión cerrada";
+
+        setTimeout(logout, 2000);
     });
 }
 

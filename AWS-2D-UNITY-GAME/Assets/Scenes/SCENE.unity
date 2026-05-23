@@ -1013,11 +1013,11 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 4582708408836824068, guid: 82a0705cf4a6a4ff198e582198a0de1c, type: 3}
       propertyPath: m_Size.x
-      value: 1.1501789
+      value: 4.5273576
       objectReference: {fileID: 0}
     - target: {fileID: 4582708408836824068, guid: 82a0705cf4a6a4ff198e582198a0de1c, type: 3}
       propertyPath: m_Offset.x
-      value: -1.9673376
+      value: -2.1525838
       objectReference: {fileID: 0}
     - target: {fileID: 4582708408836824068, guid: 82a0705cf4a6a4ff198e582198a0de1c, type: 3}
       propertyPath: m_SpriteTilingProperty.drawMode

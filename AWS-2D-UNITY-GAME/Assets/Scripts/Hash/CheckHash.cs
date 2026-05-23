@@ -83,6 +83,7 @@ public class CheckHash : MonoBehaviour
         if (string.IsNullOrEmpty(clientHash))
         {
             Debug.LogError("No se pudo calcular el hash del binario. Denegando acceso.");
+            SetAuthMessage("No se pudo verificar la integridad del juego.");
             SceneManager.LoadScene("LoginScene");
             yield break;
         }
@@ -114,8 +115,38 @@ public class CheckHash : MonoBehaviour
             Debug.LogError("CÓDIGO: " + request.responseCode);
             Debug.LogError("RESPUESTA DE AWS: " + request.downloadHandler.text);
             Debug.LogError("ERROR DE SISTEMA: " + request.error);
+            SetAuthMessage(GetLambdaMessage(
+                request.downloadHandler.text,
+                "Version del juego no autorizada. Descarga la version oficial."
+            ));
             SceneManager.LoadScene("LoginScene");
         }
+    }
+
+    private string GetLambdaMessage(string responseText, string fallback)
+    {
+        if (string.IsNullOrEmpty(responseText)) return fallback;
+
+        try
+        {
+            LambdaResponse response = JsonUtility.FromJson<LambdaResponse>(responseText);
+            if (response != null && !string.IsNullOrEmpty(response.message))
+            {
+                return response.message;
+            }
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning("CheckHash: no se pudo leer el mensaje de Lambda: " + e.Message);
+        }
+
+        return fallback;
+    }
+
+    private void SetAuthMessage(string message)
+    {
+        PlayerPrefs.SetString("AuthMessage", message);
+        PlayerPrefs.Save();
     }
 
     void Start()

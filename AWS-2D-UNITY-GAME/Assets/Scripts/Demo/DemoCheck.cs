@@ -1,4 +1,5 @@
 using System.Collections;
+using System;
 using UnityEngine;
 using UnityEngine.Networking;
 using UnityEngine.SceneManagement;
@@ -16,7 +17,7 @@ public class DemoCheck : MonoBehaviour
     IEnumerator CheckAccess()
     {
         UnityWebRequest request = UnityWebRequest.Get(DemoCheckUrl);
-        request.SetRequestHeader("Authorization", PlayerPrefs.GetString("CognitoIdToken"));
+        request.SetRequestHeader("Authorization", GetAuthToken());
 
         yield return request.SendWebRequest();
 
@@ -38,14 +39,45 @@ public class DemoCheck : MonoBehaviour
         {
             Debug.LogError($"Acceso denegado por DemoCheck (HTTP {status}): "
                            + request.downloadHandler.text);
+            SetAuthMessage(GetLambdaMessage(
+                request.downloadHandler.text,
+                "El periodo de demo ha finalizado."
+            ));
             PlayerPrefs.DeleteKey("CognitoIdToken");
             PlayerPrefs.DeleteKey("CognitoAccessToken");
             PlayerPrefs.DeleteKey("CognitoRefreshToken");
+            PlayerPrefs.Save();
             SceneManager.LoadScene("LoginScene");
             yield break;
         }
 
         Debug.Log("Acceso permitido");
+    }
+
+    private string GetLambdaMessage(string responseText, string fallback)
+    {
+        if (string.IsNullOrEmpty(responseText)) return fallback;
+
+        try
+        {
+            LambdaResponse response = JsonUtility.FromJson<LambdaResponse>(responseText);
+            if (response != null && !string.IsNullOrEmpty(response.message))
+            {
+                return response.message;
+            }
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning("DemoCheck: no se pudo leer el mensaje de Lambda: " + e.Message);
+        }
+
+        return fallback;
+    }
+
+    private void SetAuthMessage(string message)
+    {
+        PlayerPrefs.SetString("AuthMessage", message);
+        PlayerPrefs.Save();
     }
 
     void Start()
@@ -66,8 +98,19 @@ public class DemoCheck : MonoBehaviour
     private void OnApplicationQuit()
     {
         UnityWebRequest request = UnityWebRequest.Get(DemoCheckUrl);
-        request.SetRequestHeader("Authorization", PlayerPrefs.GetString("CognitoIdToken"));
+        request.SetRequestHeader("Authorization", GetAuthToken());
         request.SendWebRequest();
         Debug.Log("Aplicación cerrada.");
+    }
+
+    private string GetAuthToken()
+    {
+        if (DynamoDBManager.Instance != null)
+        {
+            string activeToken = DynamoDBManager.Instance.GetCurrentIdToken();
+            if (!string.IsNullOrEmpty(activeToken)) return activeToken;
+        }
+
+        return PlayerPrefs.GetString("CognitoIdToken");
     }
 }
